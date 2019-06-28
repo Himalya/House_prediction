@@ -1,0 +1,336 @@
+---
+title: "house_price_prediction"
+author: "Himalya"
+date: "June 26, 2019"
+output: word_document
+---
+
+#Load Packages
+```{r load packages,message=FALSE}
+library(ggplot2)
+library(ggthemes)
+library(scales)
+library(dplyr)
+library(mice)
+library(randomForest)
+library(data.table)
+library(gridExtra)
+library(corrplot)
+library(GGally)
+library(e1071)
+```
+
+#Data Overview
+```{r data overview}
+# Reading input train data and test data
+train_data <- read.csv('train_house.csv', stringsAsFactors = F)
+test_data <- read.csv('test_house.csv', stringsAsFactors = F)
+
+# Dimension of data
+cat('Housing train data has', dim(train_data)[1], 'rows and', dim(train_data)[2], 'columns')
+cat('Housing test data has', dim(test_data)[1], 'rows and', dim(test_data)[2], 'columns')
+
+# Structure of data
+str(train_data)
+str(test_data)
+
+# Summary of numerical data
+summary(train_data[,sapply(train_data[,1:81], typeof) == "integer"])
+
+# Percentage of missing data
+cat('Percentage of missing data in train is:', round(sum(is.na(train_data) / (nrow(train_data) * ncol(train_data))),3))
+cat('Percentage of missing data in test is:', round(sum(is.na(test_data) / (nrow(test_data) * ncol(test_data))),3))
+```
+
+#Combine Data
+####Test Dataset has no "Salesprice" variable. So creating it for prediction
+```{r combine data}
+# Combining rows of train and test, with "salesprice" variable in test as NA
+house_data <- bind_rows(train_data,test_data)
+
+# Data exploration
+str(house_data)
+summary(house_data)
+```
+
+#Data Visualization
+```{r data vizualization}
+# Creating training dataset with one categorical variable and one numerical variable
+house_cat_var <- names(train_data)[which(sapply(train_data, is.character))]
+house_num_var <- names(train_data)[which(sapply(train_data, is.numeric))][-1] #removing ID variable
+
+house_train_cat <- train_data[house_cat_var]
+house_train_num <- train_data[house_num_var]
+
+#Bar Plot function for count of categorical variables
+par(mfrow=c(22,2))
+plotHist <- function(data) {
+    for (i in colnames(data))
+    {
+      house_df <- data.frame(x=data[,i])
+      plot <- ggplot(house_df,aes(x=factor(x),fill=x))+
+      stat_count()+
+      xlab(colnames(data[i]))+
+      theme(axis.text.x = element_text(angle = 90))
+      print(plot)
+    }
+}
+plotHist(house_train_cat)
+# The histograms above shows that the majority of the houses have 2 full baths, 0 half baths, and have an average of 3 bedrooms.
+
+# Density Plot function for skewness of numeric variables
+plotDensity <- function(data){
+  for (i in colnames(data))
+  {
+    house_df <- data.frame(x=data[,i])
+    plot <- ggplot(house_df)+
+      geom_line(aes(x=x), stat="density")+
+      xlab(paste0(colnames(data[i]), '\n', 'Skewness:', round(skewness(data[,i], na.rm = T), 2)))
+    print(plot)
+  }
+}
+# Calling plot density function for numeric variables
+plotDensity(house_train_num)
+# Density plots of the features indicates that the features are skewed. The denisty plot for YearBuilt shows that the data set contains a mix of new and old houses. It shows a downturn in the number of houses in recent years, possibily due to the housing crisis
+
+# Box plot for Neighborhood Vs Salesprice
+ggplot(train_data, aes(x=Neighborhood, y=SalePrice, fill=Neighborhood))+
+  geom_boxplot()+
+  geom_hline(aes(yintercept=80), color="red", linetype="dashed")+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_y_continuous(labels=dollar_format())
+# Boxplot between the neighboorhoods and sale price shows that BrookSide and South & West of Iowa State University have cheap houses. While Northridge and Northridge Heights are rich neighborhoods with several outliers in terms of price.
+
+par(mfrow=c(1,1))
+# Exploring correlation
+cor_var <- cor(na.omit(house_train_num[,-1]))
+corrplot(cor_var,method = "color")
+```
+#Handling missing values
+```{r missing values}
+# Distribution of target variable (SalePrice)
+quantile(train_data$SalePrice)
+
+#Histogram for target variable
+ggplot(train_data)+geom_histogram(aes(x=SalePrice),binwidth = 20000)
+#It is not normal distribution and is positive skew
+
+#Plotting GrLivArea to see if there are any outliers
+ggplot(train_data,aes(x=GrLivArea,y=SalePrice))+geom_point()
+
+#Removing outliers from GrLivArea field(>4000)
+train_data <- train_data[train_data$GrLivArea<=4000,]
+
+#To find missing values for all variables in combined dataset(train+test)
+
+#Creating a variable for all missing data
+missing_ind <- sapply(train_data, function(x) sum(is.na(x)))
+missing_data <- data.frame(index=names(train_data),MissingValues=missing_ind)
+missing_data[missing_data$MissingValues>0,]
+
+#Data Preparation
+
+#Imputing missing 'MasVnrArea' by its mean
+house_data$MasVnrArea[which(is.na(house_data$MasVnrArea))] <- mean(house_data$MasVnrArea,na.rm = T)
+
+#Imputing missing 'LotFrontage' by its median
+house_data$LotFrontage[which(is.na(house_data$LotFrontage))] <- mean(house_data$LotFrontage,na.rm = T)
+
+#Changing NA in'GarageBlt' to 0
+house_data$GarageYrBlt[which(is.na(house_data$GarageYrBlt))] <- 0
+
+#Changing NA in 'Alley' to None 
+house_data$Alley[which(is.na(house_data$Alley))] <- "None"
+table(house_data$Alley)
+
+#Changing NA in 'MasVnrType' to None
+house_data$MasVnrType[which(is.na(house_data$MasVnrType))] <- "None"
+table(house_data$MasVnrType)
+
+#Changing NA in 'FireplaceQu' to None
+house_data$FireplaceQu[which(is.na(house_data$FireplaceQu))] <- "None"
+table(house_data$FireplaceQu)
+
+#Changing NA in 'PoolQc' to None 
+house_data$PoolQC[which(is.na(house_data$PoolQC))] <- "None"
+table(house_data$PoolQC)
+
+#Changing NA in 'Fence' to None 
+house_data$Fence[which(is.na(house_data$Fence))] <- "None"
+table(house_data$Fence)
+
+#Changing NA in 'MiscFeature' to None 
+house_data$MiscFeature[which(is.na(house_data$MiscFeature))] <- "None"
+table(house_data$MiscFeature)
+
+#Changing NA in 'GarageType' to None 
+house_data$GarageType[which(is.na(house_data$GarageType))] <- "None"
+table(house_data$GarageType)
+
+#Changing NA in 'GarageFinish' to None 
+house_data$GarageFinish[which(is.na(house_data$GarageFinish))] <- "None"
+table(house_data$GarageFinish)
+
+#Changing NA in 'GarageQual' to None 
+house_data$GarageQual[which(is.na(house_data$GarageQual))] <- "None"
+table(house_data$GarageQual)
+
+#Changing NA in 'GarageCond' to None 
+house_data$GarageCond[which(is.na(house_data$GarageCond))] <- "None"
+table(house_data$GarageCond)
+
+#Changing NA in 'BsmtQual' to None 
+house_data$BsmtQual[which(is.na(house_data$BsmtQual))] <- "None"
+table(house_data$BsmtQual)
+
+#Changing NA in 'BsmtCond' to None 
+house_data$BsmtCond[which(is.na(house_data$BsmtCond))] <- "None"
+table(house_data$BsmtCond)
+
+#Changing NA in 'BsmtExposure' to None 
+house_data$BsmtExposure[which(is.na(house_data$BsmtExposure))] <- "None"
+table(house_data$BsmtExposure)
+
+#Changing NA in 'BsmtFinType1' to None 
+house_data$BsmtFinType1[which(is.na(house_data$BsmtFinType1))] <- "None"
+table(house_data$BsmtFinType1)
+
+#Changing NA in 'BsmtFinType2' to None 
+house_data$BsmtFinType2[which(is.na(house_data$BsmtFinType2))] <- "None"
+table(house_data$BsmtFinType2)
+
+#Changing NA in 'Electrical' to None 
+house_data$Electrical[which(is.na(house_data$Electrical))] <- "None"
+table(house_data$Electrical)
+
+#Factorizing the variables
+house_data$Alley <- factor(house_data$Alley)
+house_data$MasVnrType <- factor(house_data$MasVnrType)
+house_data$FireplaceQu <- factor(house_data$FireplaceQu)
+house_data$PoolQC <- factor(house_data$PoolQC)
+house_data$Fence <- factor(house_data$Fence)
+house_data$MiscFeature <- factor(house_data$MiscFeature)
+house_data$GarageType <- factor(house_data$GarageType)
+house_data$GarageFinish <- factor(house_data$GarageFinish)
+house_data$GarageQual <- factor(house_data$GarageQual)
+house_data$GarageCond <- factor(house_data$GarageCond)
+house_data$BsmtQual <- factor(house_data$BsmtQual)
+house_data$BsmtCond <- factor(house_data$BsmtCond)
+house_data$BsmtExposure <- factor(house_data$BsmtExposure)
+house_data$BsmtFinType2 <- factor(house_data$BsmtFinType2)
+house_data$BsmtFinType1 <- factor(house_data$BsmtFinType1)
+house_data$Electrical <- factor(house_data$Electrical)
+house_data$MSZoning<- factor(house_data$MSZoning)
+house_data$Street <- factor(house_data$Street)
+house_data$LotShape <-factor(house_data$LotShape)
+house_data$LandContour<-factor(house_data$LandContour)
+house_data$Utilities<-factor(house_data$Utilities)
+house_data$LotConfig<-factor(house_data$LotConfig)
+house_data$LandSlope<-factor(house_data$LandSlope)
+house_data$Neighborhood<-factor(house_data$Neighborhood)
+house_data$Condition1<-factor(house_data$Condition1)
+house_data$Condition2<-factor(house_data$Condition2)
+house_data$BldgType<-factor(house_data$BldgType)
+house_data$HouseStyle<-factor(house_data$HouseStyle)
+house_data$RoofStyle<-factor(house_data$RoofStyle)
+house_data$RoofMatl<-factor(house_data$RoofMatl)
+house_data$Exterior1st<-factor(house_data$Exterior1st)
+house_data$Exterior2nd<-factor(house_data$Exterior2nd)
+house_data$ExterQual<-factor(house_data$ExterQual)
+house_data$ExterCond<-factor(house_data$ExterCond)
+house_data$Foundation<-factor(house_data$Foundation)
+house_data$Heating<-factor(house_data$Heating)
+house_data$HeatingQC<-factor(house_data$HeatingQC)
+house_data$CentralAir<-factor(house_data$CentralAir)
+house_data$KitchenQual<-factor(house_data$KitchenQual)
+house_data$Functional<-factor(house_data$Functional)
+house_data$PavedDrive<-factor(house_data$PavedDrive)
+house_data$SaleType<-factor(house_data$SaleType)
+house_data$SaleCondition<-factor(house_data$SaleCondition)
+str(house_data)
+
+#Taking all the numeric columns in one variable
+col_class <- sapply(names(house_data),function(x) {class(house_data[[x]])})
+numeric_col <- names(col_class[col_class!="factor"])
+
+#Determining skew of each numeric variable
+skew <- sapply(numeric_col, function(x){skewness(house_data[[x]],na.rm = T)})
+
+#Transform all variables above threshold
+skew <- skew[skew > 0.75]
+
+#To transform skew variables with log(x+1)
+for(i in names(skew))
+{
+  house_data[[i]] <- log(house_data[[i]]+1)
+}
+```
+#Model Creation
+```{r model creation}
+train_data <- house_data[1:1460,]
+test_data <- house_data[1461:2919,]
+
+#To make parition in train data
+set.seed(123)
+train_ind <- sample(1:nrow(train_data),0.8*nrow(train_data))
+new_train <- train_data[train_ind,]
+validate_train <- train_data[-train_ind,]
+new_train <- subset(new_train,select=-Id)
+validate_train <- subset(validate_train,select=-Id)
+#nrow(new_train)
+#nrow(validate_train)
+
+#Building model through random forest
+house_model <- randomForest(SalePrice~.,data = new_train)
+print(house_model)
+
+#Get importance
+house_imp <- importance(house_model)
+
+#Storing the importance variables in data frame along with IncNodePurity
+varImportance <- data.frame(Variables = row.names(house_imp),Importance = round(house_imp[,'IncNodePurity'],2))
+
+#Creating rank variable based on importance
+rankImportance <- varImportance %>% mutate(Rank=paste0("#",dense_rank(desc(Importance))))
+
+#Visualizing relative importance of first 20 variables
+ggplot(rankImportance[1:20,],aes(x=reorder(Variables,Importance), y=Importance, fill=Importance))+
+  geom_bar(stat="identity")+
+  geom_text(aes(x=Variables,y=0.5,label=Rank), hjust=0,vjust=0.55,size=4, color="red")+
+  labs(x="Variables")+
+  coord_flip()
+
+# predicting using validate set
+house_predict <- predict(house_model,validate_train)
+
+#RMSE function 
+RMSE <- function(predicted,actual)
+{
+  rmse <- sqrt(sum((log(predicted)-log(actual))^2)/length(actual))
+  return(rmse)
+}
+
+#Checking RMSE value for validate data
+check_rmse <- RMSE(house_predict,validate_train$SalePrice)
+print(check_rmse)
+
+#Actual Vs Predicted SalePrice for model validation set
+plot(house_predict,validate_train$SalePrice,main="Predicted Vs Actual SalePrice for Validation set")
+abline(0,1)
+
+#Antilog function
+antilog <- function(lx,base) 
+  { 
+  lbx<-lx/log(exp(1),base=base) 
+  result<-exp(lbx) 
+  result 
+}
+
+#Predicting SalePrice for test data and storing into csv file
+house_test_predict <- predict(house_model,test_data)
+
+#Calling antilog function to store original values in test data set for submission
+output <- data.frame(Id=test_data$Id,SalePrice=antilog(house_test_predict,2.71828))
+write.csv(output,file="submit.csv",row.names = F)
+
+```
